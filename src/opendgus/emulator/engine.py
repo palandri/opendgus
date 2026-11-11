@@ -17,7 +17,8 @@ Fidelity levels (see Device.notes at run time for what a given page used):
   hardware-checked behaviour  auto-dim (CFG 0x05.2 / 0x0082 / 0x0080, 0x0031 level), 0x0016 touch status
   assumed                     the touch that wakes a dimmed panel is not passed to the controls
   approximated                font-based controls (data_var, text_display, dgus2_text, rtc_text, hex_data,
-                              scroll_text, data_window) use a TTF stand-in for the DWIN font libraries
+                              scroll_text, data_window) use a TTF stand-in for the DWIN font libraries; data_var
+                              and text_display draw with the real N.bin font (font0 / lib_id) when the folder has it
   placeholder                 everything else is drawn as a dashed box with its name
 """
 from __future__ import annotations
@@ -38,6 +39,7 @@ from ..formats import controls as C
 from ..formats import icl as ICL
 from ..formats import spec as S
 from ..formats import specs as _specs  # noqa: F401  (registers the control specs)
+from ..formats.sizedfont import SizedGrayFont
 
 # ------------------------------------------------------------------ constants
 
@@ -67,6 +69,10 @@ APPROX = {
     "data_var": "data_var: TTF stand-in for the font library (cell font_x wide, 2*font_x tall); right/centre "
                 "alignment uses a field as wide as the configured digits",
     "text_display": "text_display: TTF stand-in, ASCII cell font_x x font_y, wide characters 2*font_x",
+    "data_var_font": "data_var: real N.bin font; glyphs advance by their valid width, centred vertically in the "
+                     "2*font_x cell; unit/sign characters without a glyph fall back to the TTF stand-in",
+    "text_display_font": "text_display: real N.bin font for ASCII (glyph advance + hor_dis, centred vertically); "
+                         "non-ASCII and missing glyphs fall back to the TTF stand-in",
     "dgus2_text": "dgus2_text: proportional TTF stand-in at font_height px, latin-1 text",
     "rtc_text": "rtc_text: TTF stand-in; Y = 2-digit year, W = 3-letter English weekday",
     "hex_data": "hex_data: TTF stand-in for the font library",
@@ -225,6 +231,7 @@ class Device:
 
     def load(self) -> None:
         self.libs: dict[int, IconLib] = {}
+        self._font_libs: dict[int, SizedGrayFont] = {}
         self.touch: list[Ctl] = []
         self.show: dict[int, list[Ctl]] = {}
         self.init_image = b""
@@ -245,6 +252,11 @@ class Device:
                     self.init_image = p.read_bytes()
                 elif ext == ".CFG" and p.name.upper().startswith("T5L"):
                     self.cfg = p.read_bytes()
+                elif ext == ".BIN" and n is not None:
+                    try:
+                        self._font_libs[n] = SizedGrayFont(p.read_bytes())
+                    except ValueError:
+                        pass                    # not a multi-size gray font (other N.bin formats)
             except Exception as e:  # keep going, report
                 self.warnings.append(f"{p.name}: {e}")
         cfg_ok = self.cfg[:5] == b"T5LC1" and len(self.cfg) > 8
@@ -882,14 +894,31 @@ class Device:
                 self._fonts[key] = load_font(None, key[0])
         return self._fonts[key]
 
+    def _sized_font(self, lib: Optional[int]) -> Optional[SizedGrayFont]:
+        return self._font_libs.get(lib) if lib else None
+
+    def _adv(self, c: str, cw: int, lib: Optional[int]) -> int:
+        """Horizontal advance of one character: 2*cw for wide ones, the glyph's valid width in a real font."""
+        if ord(c) > 0x7F:
+            return 2 * cw
+        f = self._sized_font(lib)
+        return (f.width(ord(c), cw) if f is not None else None) or cw
+
     def _cells(self, img, x: int, y: int, text: str, cw: int, ch: int, color, gap: int = 0,
-               wide_w: Optional[int] = None) -> int:
-        """Fixed-cell text: every character centred in a cw x ch cell. Returns the right edge."""
+               wide_w: Optional[int] = None, lib: Optional[int] = None) -> int:
+        """Text in cw x ch cells; with a real N.bin font (`lib`) ASCII glyphs advance by their valid width and
+        are centred vertically, everything else is a TTF glyph centred in its cell. Returns the right edge."""
         d = ImageDraw.Draw(img)
         f = self.font(min(ch * 0.9, cw * 1.75))
+        real = self._sized_font(lib)
         for c in text:
             w = wide_w if wide_w and ord(c) > 0x7F else cw
-            d.text((x + w / 2, y + ch / 2), c, font=f, fill=color, anchor="mm")
+            g = real.glyph(ord(c), cw) if real is not None and ord(c) < 0x80 else None
+            if g is not None:
+                img.paste(Image.new("RGB", g.mask.size, color), (x, y + (ch - g.height) // 2), g.mask)
+                w = g.width
+            else:
+                d.text((x + w / 2, y + ch / 2), c, font=f, fill=color, anchor="mm")
             x += w + gap
         return x
 
@@ -1202,25 +1231,27 @@ class Device:
     # -- numbers and text
 
     def _draw_data_var(self, img, v, c) -> None:
-        self._approx("data_var")
+        lib = v["lib_id"]
+        self._approx("data_var" if self._sized_font(lib) is None else "data_var_font")
         vt = v["var_type"]
         val = self.number(v["vp"], vt)
         text = format_number(val, v["n_int"], v["n_dot"], v["zero_flag"], vt in (7, 8))
         unit = v["unit"][:v["unit_len"]] if v["unit_len"] else ""
         cw = max(1, v["font_x"])
         ch = 2 * cw
-        width = (len(text) + len(unit)) * cw
+        text_w = sum(self._adv(c, cw, lib) for c in text + unit)
         signed = vt in (0, 1, 4, 7, 8)
         field_w = ((1 if signed else 0) + v["n_int"] + (v["n_dot"] + 1 if v["n_dot"] else 0) + len(unit)) * cw
         x = v["x"]
         if v["align"] == 1:
-            x += field_w - width
+            x += field_w - text_w
         elif v["align"] == 2:
-            x += (field_w - width) // 2
-        self._cells(img, x, v["y"], text + unit, cw, ch, rgb565(v["color"]))
+            x += (field_w - text_w) // 2
+        self._cells(img, x, v["y"], text + unit, cw, ch, rgb565(v["color"]), lib=lib)
 
     def _draw_text_display(self, img, v, c) -> None:
-        self._approx("text_display")
+        lib = v["font0"]
+        self._approx("text_display" if self._sized_font(lib) is None else "text_display_font")
         text = self._decode_text(self._text_bytes(v["vp"], v["text_len"]), v["encode_mode"])
         cw, ch = max(1, v["font_x"]), max(1, v["font_y"])
         x1, y1, x2, y2 = v["x1"], v["y1"], v["x2"], v["y2"]
@@ -1231,7 +1262,7 @@ class Device:
         lines, cur, curw = [], "", 0
         maxw = x2 - max(v["x"], x1)
         for chr_ in text:
-            w = (2 * cw if ord(chr_) > 0x7F else cw) + v["hor_dis"]
+            w = self._adv(chr_, cw, lib) + v["hor_dis"]
             if chr_ == "\n" or (curw + w > maxw and cur):
                 lines.append(cur)
                 cur, curw = "", 0
@@ -1247,13 +1278,13 @@ class Device:
         for i, line in enumerate(lines):
             if y + ch > y2 + 1:
                 break
-            lw = sum((2 * cw if ord(ch_) > 0x7F else cw) + v["hor_dis"] for ch_ in line)
+            lw = sum(self._adv(ch_, cw, lib) + v["hor_dis"] for ch_ in line)
             x = v["x"] if i == 0 else x1
             if v["h_align"] == 1:
                 x = x2 - lw
             elif v["h_align"] == 2:
                 x = x1 + (x2 - x1 - lw) // 2
-            self._cells(layer, x, y, line, cw, ch, (255, 255, 255), v["hor_dis"], 2 * cw)
+            self._cells(layer, x, y, line, cw, ch, (255, 255, 255), v["hor_dis"], 2 * cw, lib=lib)
             y += ch + v["ver_dis"]
         mask = layer.convert("L").crop((x1, y1, x2 + 1, y2 + 1))
         img.paste(Image.new("RGB", mask.size, col), (x1, y1), mask)

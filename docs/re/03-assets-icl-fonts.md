@@ -224,6 +224,24 @@ Glyph data:
 - File ID 0-63, one 256 KB subspace per GTF.
 - Made by the separate "GTFTool", which is not present in this install. **The format is unknown.**
 
+### 3.7 Multi-size gray font — "DGUS_2", `N.bin` [reverse engineered from DWIN_SET folders; not from the editor]
+
+A second `DGUS_2` layout, found in DWIN_SET folders produced by the DGUS tool (`1.bin`, `56.bin` of a 800×480 project). It is not the single-size Unicode font of §3.5: header byte 12 is `02`, byte 13 is the number of sub-fonts, and one file serves many sizes, indexed by ASCII code point. Read by `opendgus.formats.sizedfont.SizedGrayFont`.
+
+| Off | Size | Value |
+|---|---|---|
+| 0 | 6 | `"DGUS_2"` |
+| 12 | 1 | `02` |
+| 13 | 1 | number of sub-fonts (14 in `1.bin`, 3 in `56.bin`) |
+| 0x20 | 8 × N | size records `[5A][w][h][01][base u32 BE]`, N = 252 (font_x 4..255), ending at 0x800 |
+
+- A text_display / data_var control with `font_x` uses record `font_x − 4`. Records that share a `base` share one sub-font; the 14 sub-fonts of `1.bin` start at font_x 4, 15, 16, 17, 18, 25, 40, 50, 60, 70, 80, 90, 100 and 150, which is the size list the DGUS tool offers.
+- Glyph **height** is the largest `h` among the records of a sub-font. The first record can declare a smaller one (`1.bin` font_x 4..14 declares 12 and 28; `56.bin` font_x 4 declares 12 and the rest 250), so the height from the record being read is wrong.
+- At `base + 5 × code_point` (code points 0..255): `[valid_width u8][0xF0 | absolute address u32 BE]`. A glyph is absent when the width is 0 or the `0xF0` marker is missing. Only `0x21..0x7E` carry glyphs in the files seen.
+- Glyph data: `valid_width × height` pixels at 4 bits, high nibble first, rows not padded. The gap to the next glyph's address equals `valid_width × height / 2` (93 of 93 consecutive code points in every sub-font of both files).
+- The control advances by the glyph's valid width, not by the `font_x` cell, even when the control sets the fixed-spacing bit. Confirmed once, on a photo of a real 800×480 panel showing a 30-character `font_x=18` string (first word gap at 0.152 of the text width on the panel, 0.155 here, 0.122 with a fixed cell); other sizes and `hor_dis` values are not measured.
+- Text in the 0x80..0xFF range and GBK are not in these files; the emulator falls back to the TTF stand-in for them.
+
 ## 4. Native DLLs
 
 Exports were parsed with my own PE parser (`scratchpad/re3/pe_exports.py`; pefile is not installed).
