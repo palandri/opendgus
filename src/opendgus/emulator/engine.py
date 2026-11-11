@@ -1262,7 +1262,7 @@ class Device:
         lines, cur, curw = [], "", 0
         maxw = x2 - max(v["x"], x1)
         for chr_ in text:
-            w = self._adv(chr_, cw, lib) + v["hor_dis"]
+            w = (2 * cw if ord(chr_) > 0x7F else cw) + v["hor_dis"]
             if chr_ == "\n" or (curw + w > maxw and cur):
                 lines.append(cur)
                 cur, curw = "", 0

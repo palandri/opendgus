@@ -72,9 +72,9 @@ def test_rejects_other_bin_files():
         SizedGrayFont(b"DGUS_2" + bytes(26))                                      # magic but no size records
 
 
-def _folder(tmp_path, font0, with_font, font_bytes, h_align=0, hor_dis=0):
-    """A 800x480 DWIN_SET with one text_display at (20, 20) showing text from VP 0x5000."""
-    rec = C.text_display(0x5000, (20, 20), 0xFFFF, (20, 20, 300, 60), 8, font0, 0, 12, 24, 0,
+def _folder(tmp_path, font0, with_font, font_bytes, h_align=0, hor_dis=0, box_right=300, box_bottom=60, text_len=8):
+    """A 800x480 DWIN_SET with one text_display at (20, 20) in a box 20..box_right, text from VP 0x5000."""
+    rec = C.text_display(0x5000, (20, 20), 0xFFFF, (20, 20, box_right, box_bottom), text_len, font0, 0, 12, 24, 0,
                          h_align=h_align, hor_dis=hor_dis)
     (tmp_path / "14.bin").write_bytes(C.build_14({0: [rec]}))
     (tmp_path / "13.bin").write_bytes(C.build_13([]))
@@ -84,9 +84,13 @@ def _folder(tmp_path, font0, with_font, font_bytes, h_align=0, hor_dis=0):
     return tmp_path
 
 
-def _write_text(dev, text):
-    assert len(text) % 2 == 0, "the panel ends a string with 0xFFFF on a word boundary"
-    raw = text.encode().ljust(8, b"\xff") + b"\xff\xff"
+def _write_text(dev, text, pad_to=8):
+    """Write `text` the way the MCU does: bytes, then 0xFFFF starting on a word boundary, padded to `pad_to` bytes."""
+    raw = text.encode()
+    if len(raw) % 2:
+        raw += b"\x00"                  # an odd text needs a filler byte so that 0xFFFF starts on a word boundary
+    raw += b"\xff\xff"
+    raw = raw.ljust(pad_to + (pad_to % 2), b"\xff")
     dev.write_vp(0x5000, [int.from_bytes(raw[i:i + 2], "big") for i in range(0, len(raw), 2)])
 
 
@@ -123,3 +127,29 @@ def test_centred_text_uses_the_real_glyph_width_not_the_cell(tmp_path, font_byte
     cols = _ink_columns(dev.render(), (0, 0, 800, 480))
     left = 20 + (280 - 28) // 2
     assert (cols[0], cols[-1]) == (left, left + 27)
+
+
+def test_text_wraps_by_the_cell_width_even_though_glyphs_are_narrower(tmp_path, font_bytes):
+    """font_x=12 gives a 12 px cell. In a box 60 px wide 5 characters fit (5 x 12) and a 6th wraps onto a second
+    line, although every 'i' glyph is only 4 px wide. A real panel does the same: a 6-character time in a 100 px
+    box with a 20 px cell shows 5 characters, not 6."""
+    def ink_per_line(text):
+        folder = tmp_path / f"n{len(text)}"
+        folder.mkdir()
+        dev = Device.from_folder(_folder(folder, font0=1, with_font=True, font_bytes=font_bytes,
+                                         box_right=80, box_bottom=100, text_len=32))
+        _write_text(dev, text, pad_to=32)
+        px = dev.render().convert("L").load()
+        rows = [y for y in range(0, 120) if any(abs(px[x, y] - 40) > 20 for x in range(0, 300))]
+        lines, start = [], None
+        for y in range(0, 121):
+            has = y in set(rows)
+            if has and start is None:
+                start = y
+            if not has and start is not None:
+                lines.append(sum(1 for x in range(0, 300) if any(abs(px[x, yy] - 40) > 20 for yy in range(start, y))))
+                start = None
+        return lines
+
+    assert ink_per_line("i" * 5) == [5 * 4]                      # fits in one line: 5 glyphs x 4 px
+    assert ink_per_line("i" * 6) == [5 * 4, 4]                   # the sixth wraps onto a second line
