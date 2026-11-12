@@ -40,12 +40,14 @@ def _chunk(content=None, tool=None, finish=None):
 class FakeOpenAI:
     script = []          # list of turns; each turn is a list of chunks
     seen = []
+    kwargs = []
 
     def __init__(self, **kw):
         self.chat = NS(completions=NS(create=self._create))
 
-    def _create(self, model, messages, tools, stream):
+    def _create(self, model, messages, tools, stream, **kw):
         FakeOpenAI.seen.append([dict(m) if isinstance(m, dict) else m for m in messages])
+        FakeOpenAI.kwargs.append(kw)
         return iter(FakeOpenAI.script.pop(0))
 
 
@@ -77,6 +79,40 @@ def test_openai_provider_runs_tools(tmp_path, monkeypatch):
     # the render was shown to the model as an image in the next request
     last = FakeOpenAI.seen[-1][-1]
     assert last["role"] == "user" and last["content"][1]["type"] == "image_url"
+
+
+def test_reasoning_effort_is_sent_to_openai_compatible_providers(tmp_path, monkeypatch):
+    _project(tmp_path)
+    monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
+    FakeOpenAI.kwargs = []
+    FakeOpenAI.script = [[_chunk("ok"), _chunk(finish="stop")], [_chunk("ok"), _chunk(finish="stop")]]
+    ai.run(ChatSession(), "x", [].append, provider="openai", api_key="k", model="m")
+    ai.run(ChatSession(), "x", [].append, provider="openrouter", api_key="k", model="m", effort="high")
+    assert "reasoning_effort" not in FakeOpenAI.kwargs[0]      # provider default at "medium"
+    assert FakeOpenAI.kwargs[1]["reasoning_effort"] == "high"
+
+
+def test_reasoning_effort_rejection_retries_without_it(tmp_path, monkeypatch):
+    import httpx
+
+    class Rejecting(FakeOpenAI):
+        def _create(self, model, messages, tools, stream, **kw):
+            if kw.get("reasoning_effort"):
+                r = httpx.Response(400, request=httpx.Request("POST", "http://x"))
+                raise openai.APIStatusError("reasoning_effort is not supported for this model",
+                                            response=r, body=None)
+            return super()._create(model, messages, tools, stream, **kw)
+
+    _project(tmp_path)
+    monkeypatch.setattr(openai, "OpenAI", Rejecting)
+    FakeOpenAI.kwargs = []
+    FakeOpenAI.script = [[_chunk("ok"), _chunk(finish="stop")]]
+    events = []
+    ai.run(ChatSession(), "x", events.append, provider="openrouter", api_key="k", model="gpt-4.1",
+           effort="high")
+    assert any(e["type"] == "notice" and "does not accept reasoning effort" in e["message"] for e in events)
+    assert "error" not in [e["type"] for e in events]
+    assert FakeOpenAI.kwargs == [{}]          # the retry went out without reasoning_effort
 
 
 def test_tool_errors_go_back_to_the_model(tmp_path, monkeypatch):
