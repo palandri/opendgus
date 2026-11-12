@@ -16,8 +16,11 @@ OLLAMA_URL = "http://localhost:11434/v1"
 
 
 def chat(session: ChatSession, user_text: str, emit: Emit, *, api_key: Optional[str] = None,
-         model: str = "gpt-4.1", base_url: Optional[str] = None, send_images: bool = True) -> None:
+         model: str = "gpt-4.1", base_url: Optional[str] = None, send_images: bool = True,
+         effort: Optional[str] = None) -> None:
     client = openai.OpenAI(api_key=api_key or "not-needed", base_url=base_url or None)
+    # "medium" is the provider default; sending it would break models without reasoning support.
+    reasoning_effort = effort if effort and effort != "medium" else None
     tds = {t.name: t for t in tool_defs()}
     tools = [{"type": "function", "function": {"name": t.name, "description": t.description[:1000],
                                                "parameters": t.schema}} for t in tds.values()]
@@ -29,7 +32,8 @@ def chat(session: ChatSession, user_text: str, emit: Emit, *, api_key: Optional[
     for _ in range(MAX_TOOL_ROUNDS):
         text, calls = [], {}
         try:
-            stream = client.chat.completions.create(model=model, messages=msgs, tools=tools, stream=True)
+            extra = {"reasoning_effort": reasoning_effort} if reasoning_effort else {}
+            stream = client.chat.completions.create(model=model, messages=msgs, tools=tools, stream=True, **extra)
             finish = None
             for chunk in stream:
                 session.check()
@@ -54,6 +58,11 @@ def chat(session: ChatSession, user_text: str, emit: Emit, *, api_key: Optional[
             emit({"type": "error", "message": f"cannot reach {base_url or 'the API'} (is the server running?)"})
             return
         except openai.APIStatusError as e:
+            if reasoning_effort and e.status_code == 400 and "reasoning" in str(e.message).lower():
+                emit({"type": "notice", "message": f"{model} does not accept reasoning effort "
+                                                   f"{reasoning_effort!r}; using its default"})
+                reasoning_effort = None
+                continue
             emit({"type": "error", "message": f"API error {e.status_code}: {e.message}"})
             return
 

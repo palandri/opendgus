@@ -90,7 +90,7 @@ export function normalizeSettings(raw: unknown): AiSettings {
 export const secretName = (p: ProviderId) => `ai.apiKey.${p}`;
 
 export const usesBaseUrl = (p: ProviderId) => p === "openai" || p === "openrouter" || p === "ollama";
-export const usesEffort = (p: ProviderId) => p === "anthropic";
+export const usesEffort = (p: ProviderId) => p === "anthropic" || p === "openai" || p === "openrouter";
 
 /** Prefill for the base-URL box: the first URL found in the provider's hint ("https://... (or ...)"). */
 export function baseUrlFromHint(hint: string | undefined): string {

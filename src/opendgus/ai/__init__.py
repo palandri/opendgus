@@ -24,12 +24,13 @@ def run(session: ChatSession, user_text: str, emit: Emit, *, provider: str = "an
                    base_url=base_url)
         elif provider == "openai":
             from . import openai_provider as P
-            P.chat(session, user_text, emit, api_key=api_key, model=model or "gpt-4.1", base_url=base_url)
+            P.chat(session, user_text, emit, api_key=api_key, model=model or "gpt-4.1", base_url=base_url,
+                   effort=effort)
         elif provider == "openrouter":
             from . import openai_provider as P
             from .models import OPENROUTER_URL
             P.chat(session, user_text, emit, api_key=api_key, model=model or "anthropic/claude-sonnet-5.5",
-                   base_url=base_url or OPENROUTER_URL)
+                   base_url=base_url or OPENROUTER_URL, effort=effort)
         elif provider == "ollama":
             from . import openai_provider as P
             P.ollama_chat(session, user_text, emit, model=model or "qwen2.5:14b", base_url=base_url)
